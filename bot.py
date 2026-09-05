@@ -21,7 +21,6 @@ SETUP:
         API_HASH=...
         BOT_TOKEN=...      (from @BotFather)
         OWNER_ID=...       (your own numeric Telegram user ID)
-        SESSION_STRING=... (optional — can also /login inside the bot)
 """
 
 import asyncio
@@ -40,7 +39,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
-SAVED_SESSION = os.getenv("SESSION_STRING")  # optional, can also /login
+SAVED_SESSION = os.getenv("SESSION_STRING")  # optional, can also log in inside the bot
 
 WORKDIR = "/tmp/control_bot_exports"
 os.makedirs(WORKDIR, exist_ok=True)
@@ -191,35 +190,32 @@ def chat_action_menu(chat_id):
 @owner_only
 async def start_handler(event):
     if not logged_in():
+        state[event.sender_id] = {"action": "awaiting_session"}
         await event.respond(
             "👋 Welcome. You're not logged in yet.\n\n"
-            "Send: `/login <your_session_string>`\n\n"
-            "(Generate it once with generate_session.py on your computer, "
-            "then paste it here just once.)"
+            "🔑 Send your session string now (just paste it as a normal message).\n\n"
+            "Don't have one? Generate it with `generate_session.py`, or use the "
+            "separate Session Generator Bot."
         )
         return
     await show_main_menu(event)
 
 
-@bot.on(events.NewMessage(pattern=r"/login (.+)"))
-@owner_only
-async def login_handler(event):
+async def do_login(event, session_str):
     global user_client
-    session_str = event.pattern_match.group(1).strip()
-
     msg = await event.respond("🔐 Logging in...")
     try:
         uc = TelegramClient(StringSession(session_str), API_ID, API_HASH)
         await uc.connect()
         if not await uc.is_user_authorized():
-            await msg.edit("❌ Invalid or expired session string.")
+            await msg.edit("❌ Invalid or expired session string. Send /start to try again.")
             return
         me = await uc.get_me()
         user_client = uc
         await msg.edit(f"✅ Logged in as **{display_name(me)}** (@{me.username})")
         await show_main_menu(event)
     except Exception as e:
-        await msg.edit(f"❌ Login failed: `{e}`")
+        await msg.edit(f"❌ Login failed: `{e}`\nSend /start to try again.")
 
     # 🔒 delete the message containing the session string for safety
     try:
@@ -228,13 +224,27 @@ async def login_handler(event):
         pass
 
 
+@bot.on(events.NewMessage(pattern=r"/login (.+)"))
+@owner_only
+async def login_handler(event):
+    session_str = event.pattern_match.group(1).strip()
+    await do_login(event, session_str)
+
+
 @bot.on(events.NewMessage)
 @owner_only
 async def free_text_handler(event):
-    """Handles replies when bot is waiting for message-to-send or ID-to-delete."""
+    """Handles replies when bot is waiting for session login, message-to-send, or ID-to-delete."""
     if event.raw_text.startswith("/"):
         return
     if event.sender_id not in state:
+        return
+
+    st = state[event.sender_id]
+
+    if st.get("action") == "awaiting_session":
+        state.pop(event.sender_id)
+        await do_login(event, event.raw_text.strip())
         return
 
     st = state.pop(event.sender_id)
